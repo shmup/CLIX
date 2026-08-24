@@ -10,6 +10,8 @@ CLIX is a powerful command-line interface tool that allows you to browse and pla
 
 - Browse and play media directly from your terminal
 - Support for Movies, TV Shows, and Music libraries
+- Continue Watching: resume in-progress movies and episodes, or jump to a show's next-up episode
+- Playback position is written back to Plex, so other clients pick up where you left off
 - Download option to allow local playback
 - Fuzzy search functionality for quick media finding
 - Intuitive navigation with keyboard controls
@@ -118,6 +120,7 @@ To find your Plex token, follow the instructions here: [Finding an authenticatio
 ### Menu Structure
 
 1. Main Menu
+   - Continue Watching
    - Movies
    - TV Shows
    - Music
@@ -131,8 +134,12 @@ To find your Plex token, follow the instructions here: [Finding an authenticatio
 
 3. Media Selection
    - Movies: Browse and select movie
-   - TV Shows: Select show → season → episode
+   - TV Shows: Select show → season → episode (the show's next-up episode is listed above its seasons)
    - Music: Select artist → album → track
+
+## Resuming
+
+Partly watched movies and episodes offer `Resume from ...` next to playing from the start. Quitting mpv with `q` saves the position back to Plex; watching to the end marks the item watched.
 
 ## Updates
 

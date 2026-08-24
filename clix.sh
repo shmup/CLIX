@@ -38,6 +38,7 @@ PLEX_TOKEN=""
 # Credentials may also live outside the script, so that -u updates and git
 # checkouts never carry a token. Precedence: env > config file > above.
 CLIX_CONFIG="${CLIX_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/clix/config}"
+# shellcheck source=/dev/null
 [[ -r "$CLIX_CONFIG" ]] && source "$CLIX_CONFIG"
 PLEX_URL="${CLIX_PLEX_URL:-$PLEX_URL}"
 PLEX_TOKEN="${CLIX_PLEX_TOKEN:-$PLEX_TOKEN}"
@@ -63,6 +64,7 @@ CACHE_DIR="/tmp/clix_cache_$(id -u)"
 VERSION="1.4.0"
 
 CLIX_PID=$$
+CLIX_CLIENT_ID="clix-$(hostname)"
 
 trap 'clear; exit 130' USR1
 
@@ -257,6 +259,7 @@ NAVIGATION:
 
 MENU STRUCTURE:
     1. Main Menu
+        - Continue Watching
         - Movies
         - TV Shows
         - Music
@@ -274,7 +277,15 @@ MENU STRUCTURE:
     3. Media Selection
         Movies: Select movie from list
         TV Shows: Select show → season → episode
+                  (a show's next-up episode is listed
+                   above its seasons)
         Music: Select artist → album → track
+
+RESUMING:
+    Anything partly watched offers "Resume from ..."
+    alongside playing from the start. Quitting mpv with q
+    saves your position back to Plex; watching to the end
+    marks the item watched.
 
 DEPENDENCIES:
     Required: curl, xmlstarlet, fzf, mpv, md5sum
@@ -801,6 +812,38 @@ get_seasons() {
     grep -v "^All episodes|" | sort -V | sed 's/&amp;/\&/g' | tee >(cache_set "$cache_key")
 }
 
+# In-progress and next-up items across every library.
+# Emits: type|ratingKey|viewOffset|duration|show|season|episode|title|year
+get_continue_watching() {
+    local response
+    response=$(curl -s -H "X-Plex-Token: $PLEX_TOKEN" "${PLEX_URL}/hubs/continueWatching?X-Plex-Container-Start=0&X-Plex-Container-Size=50")
+
+    if [[ -z "$response" ]]; then
+        response=$(curl -s -H "X-Plex-Token: $PLEX_TOKEN" "${PLEX_URL}/library/onDeck")
+    fi
+
+    [[ -z "$response" ]] && return 1
+
+    echo "$response" | xmlstarlet sel -t -m "//Video" \
+        -v "concat(@type,'|',@ratingKey,'|',@viewOffset,'|',@duration,'|',@grandparentTitle,'|',@parentIndex,'|',@index,'|',@title,'|',@year)" -n |
+        sed 's/&amp;/\&/g'
+}
+
+# The single next-up episode for one show.
+# Emits: ratingKey|season|episode|title|viewOffset|duration
+get_show_on_deck() {
+    local show_key="$1"
+
+    local response
+    response=$(curl -s -H "X-Plex-Token: $PLEX_TOKEN" "${PLEX_URL}/library/metadata/${show_key}?includeOnDeck=1")
+
+    [[ -z "$response" ]] && return 1
+
+    echo "$response" | xmlstarlet sel -t -m "//OnDeck/Video" \
+        -v "concat(@ratingKey,'|',@parentIndex,'|',@index,'|',@title,'|',@viewOffset,'|',@duration)" -n |
+        sed 's/&amp;/\&/g'
+}
+
 get_episodes() {
     local season_key="$1"
     cached_plex_query "$(get_cache_key "get_episodes" "$season_key")" \
@@ -808,10 +851,78 @@ get_episodes() {
         sel -t -m "//Video" -v "concat(@index, '. ', @title, '|', @ratingKey)" -n
 }
 
+# Milliseconds -> M:SS or H:MM:SS
+format_time() {
+    local total=$(( ${1:-0} / 1000 ))
+
+    if (( total >= 3600 )); then
+        printf '%d:%02d:%02d' $((total / 3600)) $(((total % 3600) / 60)) $((total % 60))
+    else
+        printf '%d:%02d' $((total / 60)) $((total % 60))
+    fi
+}
+
+# Tell Plex where playback stopped, so Continue Watching reflects what was
+# watched here and not only what other clients did. An empty position means
+# playback ran to the end.
+report_progress() {
+    local media_key="$1"
+    local position_sec="$2"
+    local duration_ms="$3"
+
+    [[ -z "$media_key" ]] && return 0
+
+    local -a auth=(-H "X-Plex-Token: $PLEX_TOKEN" -H "X-Plex-Client-Identifier: $CLIX_CLIENT_ID")
+
+    if [[ -n "$position_sec" ]]; then
+        local position_ms=$(( ${position_sec%.*} * 1000 ))
+        curl -s -o /dev/null -m 10 "${auth[@]}" \
+            "${PLEX_URL}/:/timeline?ratingKey=${media_key}&key=/library/metadata/${media_key}&identifier=com.plexapp.plugins.library&state=stopped&time=${position_ms}&duration=${duration_ms}"
+    else
+        curl -s -o /dev/null -m 10 "${auth[@]}" \
+            "${PLEX_URL}/:/scrobble?key=${media_key}&identifier=com.plexapp.plugins.library"
+    fi
+}
+
+# mpv writes a watch-later file only when playback is quit early; a private
+# directory per playback makes that file the position to report back.
+run_mpv() {
+    local media_key="$1"
+    local title="$2"
+    local start_sec="$3"
+    local duration_ms="$4"
+    shift 4
+
+    local watch_dir
+    watch_dir=$(mktemp -d "${CACHE_DIR}/watch_later.XXXXXX")
+
+    local -a opts=(--title="$title" --no-resume-playback --save-position-on-quit "--watch-later-dir=$watch_dir")
+    if [[ "$start_sec" =~ ^[0-9]+$ ]] && (( start_sec > 0 )); then
+        opts+=("--start=${start_sec}")
+    fi
+
+    mpv "${opts[@]}" "$@"
+    local status=$?
+
+    local position
+    position=$(cat "$watch_dir"/* 2>/dev/null | sed -n 's/^start=//p' | tail -n 1)
+    rm -rf "$watch_dir"
+
+    if [[ -n "$position" ]]; then
+        report_progress "$media_key" "$position" "$duration_ms"
+    elif [[ $status -eq 0 ]]; then
+        report_progress "$media_key" "" "$duration_ms"
+    fi
+
+    return $status
+}
+
 play_media() {
     local media_key="$1"
     local media_type="$2"
     local title="$3"
+    local start_sec="$4"
+    local duration_ms="$5"
 
     local media_url
     if ! media_url=$(get_stream_url "$media_key" "$media_type"); then
@@ -820,8 +931,13 @@ play_media() {
         return 1
     fi
 
+    # Plex tracks progress for movies and episodes only.
+    local report_key="$media_key"
+    [[ "$media_type" == "music" ]] && report_key=""
+
     echo "Playing $media_type: $title"
-    mpv --http-header-fields="X-Plex-Token: $PLEX_TOKEN" --title="$title" "$media_url"
+    run_mpv "$report_key" "$title" "$start_sec" "$duration_ms" \
+        --http-header-fields="X-Plex-Token: $PLEX_TOKEN" "$media_url"
     clear
     return 0
 }
@@ -1146,6 +1262,15 @@ handle_media() {
         action_options="Play Local File\n${action_options}"
     fi
 
+    local view_offset duration resume_sec=0
+    view_offset=$(echo "$response" | xmlstarlet sel -t -v "//Video/@viewOffset" 2>/dev/null)
+    duration=$(echo "$response" | xmlstarlet sel -t -v "//Video/@duration" 2>/dev/null)
+
+    if [[ "$view_offset" =~ ^[0-9]+$ ]] && (( view_offset > 0 )); then
+        resume_sec=$(( view_offset / 1000 ))
+        action_options="Resume from $(format_time "$view_offset")\n${action_options}"
+    fi
+
     local action
     action=$(echo -e "${action_options}\nCancel" | fzf_menu --reverse --header="$action_prompt" --prompt="Choose action > ")
 
@@ -1157,9 +1282,13 @@ handle_media() {
                 clear
             fi
             ;;
+        "Resume from"*)
+            clear
+            play_media "$media_key" "$media_type" "$display_title" "$resume_sec" "$duration"
+            ;;
         "Play from Plex")
             clear
-            play_media "$media_key" "$media_type" "$display_title"
+            play_media "$media_key" "$media_type" "$display_title" 0 "$duration"
             ;;
         "Download")
             clear
@@ -1169,6 +1298,54 @@ handle_media() {
             return 0
             ;;
     esac
+}
+
+continue_watching_menu() {
+    while true; do
+        local items
+        items=$(get_continue_watching)
+
+        if [[ -z "$items" ]]; then
+            echo -e "< Go back" | fzf_menu --reverse --header="Nothing in progress" --disabled
+            clear
+            return 0
+        fi
+
+        # Each menu line is: label|ratingKey|type|title
+        local menu=""
+        local type key offset duration show season episode title year label
+        while IFS='|' read -r type key offset duration show season episode title year; do
+            [[ -z "$key" ]] && continue
+
+            if [[ "$type" == "episode" ]]; then
+                label=$(printf '%s - S%02dE%02d - %s' "$show" "${season:-0}" "${episode:-0}" "$title")
+            else
+                label="$title"
+                [[ -n "$year" ]] && label="${label} (${year})"
+            fi
+
+            if [[ "$offset" =~ ^[0-9]+$ ]] && (( offset > 0 )); then
+                label="${label}  [$(format_time "$offset") / $(format_time "$duration")]"
+            else
+                label="${label}  [next up]"
+            fi
+
+            menu+="${label}|${key}|${type}|${title}"$'\n'
+        done <<< "$items"
+
+        local chosen
+        chosen=$(echo "$menu" | sed '/^$/d' | cut -d'|' -f1 | fzf_menu --reverse --header="Continue Watching" --prompt="Search Continue Watching > ")
+
+        if [[ -z "$chosen" ]]; then
+            clear
+            return 0
+        fi
+
+        local line
+        line=$(awk -F'|' -v want="$chosen" '$1 == want { print; exit }' <<< "$menu")
+
+        handle_media "$(cut -d'|' -f2 <<< "$line")" "$(cut -d'|' -f3 <<< "$line")" "$(cut -d'|' -f4- <<< "$line")"
+    done
 }
 
 select_media() {
@@ -1298,12 +1475,38 @@ select_media() {
                         local seasons
                         seasons=$(get_seasons "$show_key")
 
+                        # Offer the show's next-up episode above the season list.
+                        local on_deck continue_label=""
+                        local od_key od_season od_episode od_title od_offset od_duration
+                        on_deck=$(get_show_on_deck "$show_key")
+
+                        if [[ -n "$on_deck" ]]; then
+                            IFS='|' read -r od_key od_season od_episode od_title od_offset od_duration <<< "$on_deck"
+                            continue_label=$(printf 'Continue: S%02dE%02d - %s' "${od_season:-0}" "${od_episode:-0}" "$od_title")
+
+                            if [[ "$od_offset" =~ ^[0-9]+$ ]] && (( od_offset > 0 )); then
+                                continue_label="${continue_label}  [$(format_time "$od_offset") / $(format_time "$od_duration")]"
+                            fi
+                        fi
+
+                        local season_list
+                        season_list=$(echo "$seasons" | cut -d'|' -f1)
+
+                        if [[ -n "$continue_label" ]]; then
+                            season_list="${continue_label}"$'\n'"${season_list}"
+                        fi
+
                         local chosen_season
-                        chosen_season=$(echo "$seasons" | cut -d'|' -f1 | fzf_menu --reverse --header="TV Show: $chosen_show
+                        chosen_season=$(echo "$season_list" | fzf_menu --reverse --header="TV Show: $chosen_show
 Select Season" --prompt="Search Seasons > ")
 
                         if [[ -z "$chosen_season" ]]; then
                             break
+                        fi
+
+                        if [[ -n "$continue_label" && "$chosen_season" == "$continue_label" ]]; then
+                            handle_media "$od_key" "episode" "$od_title"
+                            continue
                         fi
 
                         local season_key
@@ -1438,7 +1641,7 @@ Select Track" --prompt="Search Tracks > ")
 
 main_menu() {
     local choice
-    choice=$(echo -e "Movies\nTV Shows\nMusic\nDownloads\n----------\nUpdate\nHelp\n----------\nQuit" | fzf_menu --reverse --header="Select Media Type" --prompt="Search Menu > ")
+    choice=$(echo -e "Continue Watching\n----------\nMovies\nTV Shows\nMusic\nDownloads\n----------\nUpdate\nHelp\n----------\nQuit" | fzf_menu --reverse --header="Select Media Type" --prompt="Search Menu > ")
 
     if [[ -z "$choice" ]]; then
         clear
@@ -1446,6 +1649,7 @@ main_menu() {
     fi
 
     case "$choice" in
+        "Continue Watching") continue_watching_menu ;;
         Movies) select_media "movie" ;;
         "TV Shows") select_media "show" ;;
         Music) select_media "music" ;;
