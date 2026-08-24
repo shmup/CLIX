@@ -257,7 +257,7 @@ OPTIONS:
 NAVIGATION:
     ↑/↓         Move up/down in menus
     Enter       Select current item
-    ESC         Go back to previous menu
+    ESC         Go back to previous menu, or exit from the main menu
     Ctrl+C      Exit the program or Exit from Music track
     Type to search   Fuzzy finding in any menu
 
@@ -1647,9 +1647,10 @@ main_menu() {
     local choice
     choice=$(echo -e "Continue Watching\n----------\nMovies\nTV Shows\nMusic\nDownloads\n----------\nUpdate\nHelp\n----------\nQuit" | fzf_menu --reverse --header="Select Media Type" --prompt="Search Menu > ")
 
+    # ESC on the main menu has nothing to go back to, so it quits.
     if [[ -z "$choice" ]]; then
         clear
-        return
+        exit 0
     fi
 
     case "$choice" in

@@ -113,7 +113,7 @@ To find your Plex token, follow the instructions here: [Finding an authenticatio
 
 - `↑/↓` - Move up/down in menus
 - `Enter` - Select current item
-- `ESC` - Go back to previous menu
+- `ESC` - Go back to previous menu, or exit from the main menu
 - `Ctrl+C` - Exit the program
 - Type to search - Fuzzy finding in any menu
 
