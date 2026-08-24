@@ -82,6 +82,13 @@ PLEX_URL="http://localhost:32400"  # Your Plex server URL
 PLEX_TOKEN=""                      # Your Plex authentication token
 ```
 
+Or keep them out of the script entirely — CLIX sources `~/.config/clix/config` (override the path with `CLIX_CONFIG`) and honors `CLIX_PLEX_URL` / `CLIX_PLEX_TOKEN` from the environment, which take precedence:
+
+```bash
+PLEX_URL="http://localhost:32400"
+PLEX_TOKEN="your-token"
+```
+
 To find your Plex token, follow the instructions here: [Finding an authentication token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
 
 ## Usage

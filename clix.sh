@@ -35,6 +35,13 @@
 PLEX_URL="http://localhost:32400"
 PLEX_TOKEN=""
 
+# Credentials may also live outside the script, so that -u updates and git
+# checkouts never carry a token. Precedence: env > config file > above.
+CLIX_CONFIG="${CLIX_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/clix/config}"
+[[ -r "$CLIX_CONFIG" ]] && source "$CLIX_CONFIG"
+PLEX_URL="${CLIX_PLEX_URL:-$PLEX_URL}"
+PLEX_TOKEN="${CLIX_PLEX_TOKEN:-$PLEX_TOKEN}"
+
 ######################
 # Directory Settings #
 ######################
@@ -281,7 +288,7 @@ check_plex_credentials() {
 
     if [ -z "$PLEX_URL" ] || [ -z "$PLEX_TOKEN" ]; then
         echo "Error: Plex URL or token not set"
-        echo "Please edit this script and add your Plex credentials"
+        echo "Set PLEX_URL and PLEX_TOKEN in ${CLIX_CONFIG} or at the top of this script"
         exit 1
     fi
 
