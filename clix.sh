@@ -68,17 +68,21 @@ CLIX_CLIENT_ID="clix-$(hostname)"
 
 trap 'clear; exit 130' USR1
 
-# Every menu runs fzf inside a command substitution, so an fzf abort (Ctrl-C,
-# exit 130) happens in a subshell and cannot quit the script from there. Signal
-# the main shell instead, which traps USR1 and exits.
+# fzf aborts with the same exit code for ESC and Ctrl-C, so --expect is what
+# tells them apart: ESC returns nothing and the caller goes back a menu, while
+# Ctrl-C quits CLIX. Menus run fzf inside command substitutions, so quitting
+# has to go through a signal to the main shell rather than an exit here.
 fzf_menu() {
     local output status
-    output=$(fzf "$@")
+    output=$(fzf --expect=ctrl-c "$@")
     status=$?
-    if [[ $status -eq 130 ]]; then
+
+    if [[ "$(head -n 1 <<< "$output")" == "ctrl-c" ]]; then
         kill -USR1 "$CLIX_PID" 2>/dev/null
+        return 130
     fi
-    printf '%s\n' "$output"
+
+    tail -n +2 <<< "$output"
     return $status
 }
 
