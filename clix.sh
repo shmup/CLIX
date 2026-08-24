@@ -62,6 +62,24 @@ CACHE_DIR="/tmp/clix_cache_$(id -u)"
 
 VERSION="1.4.0"
 
+CLIX_PID=$$
+
+trap 'clear; exit 130' USR1
+
+# Every menu runs fzf inside a command substitution, so an fzf abort (Ctrl-C,
+# exit 130) happens in a subshell and cannot quit the script from there. Signal
+# the main shell instead, which traps USR1 and exits.
+fzf_menu() {
+    local output status
+    output=$(fzf "$@")
+    status=$?
+    if [[ $status -eq 130 ]]; then
+        kill -USR1 "$CLIX_PID" 2>/dev/null
+    fi
+    printf '%s\n' "$output"
+    return $status
+}
+
 create_download_dirs() {
     mkdir -p "${MOVIES_DIR}"
     mkdir -p "${SHOWS_DIR}"
@@ -335,7 +353,7 @@ check_plex_credentials() {
 downloads_menu() {
     while true; do
         local choice
-        choice=$(echo -e "Movies\nTV Shows\nMusic" | fzf --reverse --header="Downloads Menu" --prompt="Search Downloads > ")
+        choice=$(echo -e "Movies\nTV Shows\nMusic" | fzf_menu --reverse --header="Downloads Menu" --prompt="Search Downloads > ")
 
         case "$choice" in
             Movies) list_downloaded_movies ;;
@@ -348,7 +366,7 @@ downloads_menu() {
 
 list_downloaded_movies() {
     if [ ! -d "$MOVIES_DIR" ] || [ -z "$(ls -A "$MOVIES_DIR")" ]; then
-        echo -e "< Go back" | fzf --reverse --header="No downloaded movies found" --disabled
+        echo -e "< Go back" | fzf_menu --reverse --header="No downloaded movies found" --disabled
         clear
         return
     fi
@@ -369,7 +387,7 @@ list_downloaded_movies() {
         done <<< "$movies"
 
         local chosen_display
-        chosen_display=$(echo -e "$display_movies" | sed '/^$/d' | fzf --reverse --header="Select Downloaded Movie" --prompt="Search Downloaded Movies > ")
+        chosen_display=$(echo -e "$display_movies" | sed '/^$/d' | fzf_menu --reverse --header="Select Downloaded Movie" --prompt="Search Downloaded Movies > ")
 
         if [[ -z "$chosen_display" ]]; then
             break
@@ -384,7 +402,7 @@ list_downloaded_movies() {
 
 list_downloaded_shows() {
     if [ ! -d "$SHOWS_DIR" ] || [ -z "$(ls -A "$SHOWS_DIR")" ]; then
-        echo -e "< Go back" | fzf --reverse --header="No downloaded TV shows found" --disabled
+        echo -e "< Go back" | fzf_menu --reverse --header="No downloaded TV shows found" --disabled
         clear
         return
     fi
@@ -404,7 +422,7 @@ list_downloaded_shows() {
         done <<< "$shows"
 
         local chosen_show_display
-        chosen_show_display=$(echo -e "$display_shows" | sed '/^$/d' | fzf --reverse --header="Select Downloaded TV Show" --prompt="Search Downloaded TV Shows > ")
+        chosen_show_display=$(echo -e "$display_shows" | sed '/^$/d' | fzf_menu --reverse --header="Select Downloaded TV Show" --prompt="Search Downloaded TV Shows > ")
 
         if [[ -z "$chosen_show_display" ]]; then
             break
@@ -417,7 +435,7 @@ list_downloaded_shows() {
             seasons=$(find "$SHOWS_DIR/$original_show" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -V)
 
             if [[ -z "$seasons" ]]; then
-                echo -e "< Go back" | fzf --reverse --header="No seasons found" --disabled
+                echo -e "< Go back" | fzf_menu --reverse --header="No seasons found" --disabled
                 clear
                 break
             fi
@@ -431,7 +449,7 @@ list_downloaded_shows() {
             done <<< "$seasons"
 
             local chosen_season_display
-            chosen_season_display=$(echo -e "$display_seasons" | sed '/^$/d' | fzf --reverse --header="TV Show: $chosen_show_display
+            chosen_season_display=$(echo -e "$display_seasons" | sed '/^$/d' | fzf_menu --reverse --header="TV Show: $chosen_show_display
 Select Downloaded Season" --prompt="Search Downloaded Seasons > ")
 
             if [[ -z "$chosen_season_display" ]]; then
@@ -445,7 +463,7 @@ Select Downloaded Season" --prompt="Search Downloaded Seasons > ")
                 episodes=$(find "$SHOWS_DIR/$original_show/$original_season" -type f -exec basename {} \; | sort -V)
 
                 if [[ -z "$episodes" ]]; then
-                    echo -e "< Go back" | fzf --reverse --header="No episodes found" --disabled
+                    echo -e "< Go back" | fzf_menu --reverse --header="No episodes found" --disabled
                     clear
                     break
                 fi
@@ -474,7 +492,7 @@ Select Downloaded Season" --prompt="Search Downloaded Seasons > ")
                 done <<< "$episodes"
 
                 local chosen_display
-                chosen_display=$(echo -e "$display_episodes" | sed '/^$/d' | fzf --reverse --header="TV Show: $chosen_show_display
+                chosen_display=$(echo -e "$display_episodes" | sed '/^$/d' | fzf_menu --reverse --header="TV Show: $chosen_show_display
 Season: $chosen_season_display
 Select Downloaded Episode" --prompt="Search Downloaded Episodes > ")
 
@@ -501,7 +519,7 @@ Select Downloaded Episode" --prompt="Search Downloaded Episodes > ")
 
 list_downloaded_music() {
     if [ ! -d "$MUSIC_DIR" ] || [ -z "$(ls -A "$MUSIC_DIR")" ]; then
-        echo -e "< Go back" | fzf --reverse --header="No downloaded music found" --disabled
+        echo -e "< Go back" | fzf_menu --reverse --header="No downloaded music found" --disabled
         clear
         return
     fi
@@ -520,7 +538,7 @@ list_downloaded_music() {
         done <<< "$artists"
 
         local chosen_artist_display
-        chosen_artist_display=$(echo -e "$display_artists" | sed '/^$/d' | fzf --reverse --header="Select Downloaded Artist" --prompt="Search Downloaded Artists > ")
+        chosen_artist_display=$(echo -e "$display_artists" | sed '/^$/d' | fzf_menu --reverse --header="Select Downloaded Artist" --prompt="Search Downloaded Artists > ")
 
         if [[ -z "$chosen_artist_display" ]]; then
             break
@@ -533,7 +551,7 @@ list_downloaded_music() {
             albums=$(find "$MUSIC_DIR/$original_artist" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
 
             if [[ -z "$albums" ]]; then
-                echo -e "< Go back" | fzf --reverse --header="No albums found" --disabled
+                echo -e "< Go back" | fzf_menu --reverse --header="No albums found" --disabled
                 clear
                 break
             fi
@@ -548,7 +566,7 @@ list_downloaded_music() {
             done <<< "$albums"
 
             local chosen_album_display
-            chosen_album_display=$(echo -e "$display_albums" | sed '/^$/d' | fzf --reverse --header="Artist: $chosen_artist_display
+            chosen_album_display=$(echo -e "$display_albums" | sed '/^$/d' | fzf_menu --reverse --header="Artist: $chosen_artist_display
 Select Downloaded Album" --prompt="Search Downloaded Albums > ")
 
             if [[ -z "$chosen_album_display" ]]; then
@@ -562,7 +580,7 @@ Select Downloaded Album" --prompt="Search Downloaded Albums > ")
                 tracks=$(find "$MUSIC_DIR/$original_artist/$original_album" -type f -exec basename {} \; | sort -V)
 
                 if [[ -z "$tracks" ]]; then
-                    echo -e "< Go back" | fzf --reverse --header="No tracks found" --disabled
+                    echo -e "< Go back" | fzf_menu --reverse --header="No tracks found" --disabled
                     clear
                     break
                 fi
@@ -590,7 +608,7 @@ Select Downloaded Album" --prompt="Search Downloaded Albums > ")
                 done <<< "$tracks"
 
                 local chosen_track_display
-                chosen_track_display=$(echo -e "$display_tracks" | sed '/^$/d' | fzf --reverse --header="Artist: $chosen_artist_display
+                chosen_track_display=$(echo -e "$display_tracks" | sed '/^$/d' | fzf_menu --reverse --header="Artist: $chosen_artist_display
 Album: $chosen_album_display
 Select Downloaded Track" --prompt="Search Downloaded Tracks > ")
 
@@ -1129,7 +1147,7 @@ handle_media() {
     fi
 
     local action
-    action=$(echo -e "${action_options}\nCancel" | fzf --reverse --header="$action_prompt" --prompt="Choose action > ")
+    action=$(echo -e "${action_options}\nCancel" | fzf_menu --reverse --header="$action_prompt" --prompt="Choose action > ")
 
     case "$action" in
         "Play Local File")
@@ -1177,7 +1195,7 @@ select_media() {
                     chosen_library=$(echo "$libraries" | cut -d'|' -f2)
                     lib_key=$(echo "$libraries" | cut -d'|' -f1)
                 else
-                    chosen_library=$(echo "$libraries" | cut -d'|' -f2 | fzf --reverse --header="Select Movie Library" --prompt="Search Movie Libraries > ")
+                    chosen_library=$(echo "$libraries" | cut -d'|' -f2 | fzf_menu --reverse --header="Select Movie Library" --prompt="Search Movie Libraries > ")
 
                     if [[ -z "$chosen_library" ]]; then
                         return 1
@@ -1191,7 +1209,7 @@ select_media() {
                     movies=$(get_library_contents "$lib_key")
 
                     if [[ "$movies" == "EMPTY_LIBRARY" ]]; then
-                        echo -e "< Go back" | fzf --reverse --header="Library Empty" --disabled
+                        echo -e "< Go back" | fzf_menu --reverse --header="Library Empty" --disabled
                         clear
                         if [[ $lib_count -eq 1 ]]; then
                             return 1
@@ -1201,7 +1219,7 @@ select_media() {
                     fi
 
                     local chosen_movie
-                    chosen_movie=$(echo "$movies" | cut -d'|' -f1 | fzf --reverse --header="Select Movie" --prompt="Search Movies > ")
+                    chosen_movie=$(echo "$movies" | cut -d'|' -f1 | fzf_menu --reverse --header="Select Movie" --prompt="Search Movies > ")
 
                     if [[ -z "$chosen_movie" ]]; then
                         if [[ $lib_count -eq 1 ]]; then
@@ -1239,7 +1257,7 @@ select_media() {
                     chosen_library=$(echo "$libraries" | cut -d'|' -f2)
                     lib_key=$(echo "$libraries" | cut -d'|' -f1)
                 else
-                    chosen_library=$(echo "$libraries" | cut -d'|' -f2 | fzf --reverse --header="Select TV Show Library" --prompt="Search TV Show Libraries > ")
+                    chosen_library=$(echo "$libraries" | cut -d'|' -f2 | fzf_menu --reverse --header="Select TV Show Library" --prompt="Search TV Show Libraries > ")
 
                     if [[ -z "$chosen_library" ]]; then
                         return 1
@@ -1253,7 +1271,7 @@ select_media() {
                     shows=$(get_library_contents "$lib_key")
 
                     if [[ "$shows" == "EMPTY_LIBRARY" ]]; then
-                        echo -e "< Go back" | fzf --reverse --header="Library Empty" --disabled
+                        echo -e "< Go back" | fzf_menu --reverse --header="Library Empty" --disabled
                         clear
                         if [[ $lib_count -eq 1 ]]; then
                             return 1
@@ -1263,7 +1281,7 @@ select_media() {
                     fi
 
                     local chosen_show
-                    chosen_show=$(echo "$shows" | cut -d'|' -f1 | fzf --reverse --header="Select TV Show" --prompt="Search TV Shows > ")
+                    chosen_show=$(echo "$shows" | cut -d'|' -f1 | fzf_menu --reverse --header="Select TV Show" --prompt="Search TV Shows > ")
 
                     if [[ -z "$chosen_show" ]]; then
                         if [[ $lib_count -eq 1 ]]; then
@@ -1281,7 +1299,7 @@ select_media() {
                         seasons=$(get_seasons "$show_key")
 
                         local chosen_season
-                        chosen_season=$(echo "$seasons" | cut -d'|' -f1 | fzf --reverse --header="TV Show: $chosen_show
+                        chosen_season=$(echo "$seasons" | cut -d'|' -f1 | fzf_menu --reverse --header="TV Show: $chosen_show
 Select Season" --prompt="Search Seasons > ")
 
                         if [[ -z "$chosen_season" ]]; then
@@ -1296,7 +1314,7 @@ Select Season" --prompt="Search Seasons > ")
                             episodes=$(get_episodes "$season_key")
 
                             local chosen_episode
-                            chosen_episode=$(echo "$episodes" | cut -d'|' -f1 | fzf --reverse --header="TV Show: $chosen_show
+                            chosen_episode=$(echo "$episodes" | cut -d'|' -f1 | fzf_menu --reverse --header="TV Show: $chosen_show
 Season: $chosen_season
 Select Episode" --prompt="Search Episodes > ")
 
@@ -1335,7 +1353,7 @@ Select Episode" --prompt="Search Episodes > ")
                     chosen_library=$(echo "$libraries" | cut -d'|' -f2)
                     lib_key=$(echo "$libraries" | cut -d'|' -f1)
                 else
-                    chosen_library=$(echo "$libraries" | cut -d'|' -f2 | fzf --reverse --header="Select Music Library" --prompt="Search Music Libraries > ")
+                    chosen_library=$(echo "$libraries" | cut -d'|' -f2 | fzf_menu --reverse --header="Select Music Library" --prompt="Search Music Libraries > ")
 
                     if [[ -z "$chosen_library" ]]; then
                         return 1
@@ -1349,7 +1367,7 @@ Select Episode" --prompt="Search Episodes > ")
                     artists=$(get_library_contents "$lib_key")
 
                     if [[ "$artists" == "EMPTY_LIBRARY" ]]; then
-                        echo -e "< Go back" | fzf --reverse --header="Library Empty" --disabled
+                        echo -e "< Go back" | fzf_menu --reverse --header="Library Empty" --disabled
                         clear
                         if [[ $lib_count -eq 1 ]]; then
                             return 1
@@ -1359,7 +1377,7 @@ Select Episode" --prompt="Search Episodes > ")
                     fi
 
                     local chosen_artist
-                    chosen_artist=$(echo "$artists" | cut -d'|' -f1 | fzf --reverse --header="Select Artist" --prompt="Search Artists > ")
+                    chosen_artist=$(echo "$artists" | cut -d'|' -f1 | fzf_menu --reverse --header="Select Artist" --prompt="Search Artists > ")
 
                     if [[ -z "$chosen_artist" ]]; then
                         if [[ $lib_count -eq 1 ]]; then
@@ -1377,7 +1395,7 @@ Select Episode" --prompt="Search Episodes > ")
                         albums=$(get_albums "$artist_key")
 
                         local chosen_album
-                        chosen_album=$(echo "$albums" | cut -d'|' -f1 | fzf --reverse --header="Artist: $chosen_artist
+                        chosen_album=$(echo "$albums" | cut -d'|' -f1 | fzf_menu --reverse --header="Artist: $chosen_artist
 Select Album" --prompt="Search Albums > ")
 
                         if [[ -z "$chosen_album" ]]; then
@@ -1392,7 +1410,7 @@ Select Album" --prompt="Search Albums > ")
                             tracks=$(get_tracks "$album_key")
 
                             local chosen_track
-                            chosen_track=$(echo "$tracks" | cut -d'|' -f1 | fzf --reverse --header="Artist: $chosen_artist
+                            chosen_track=$(echo "$tracks" | cut -d'|' -f1 | fzf_menu --reverse --header="Artist: $chosen_artist
 Album: $chosen_album
 Select Track" --prompt="Search Tracks > ")
 
@@ -1420,7 +1438,7 @@ Select Track" --prompt="Search Tracks > ")
 
 main_menu() {
     local choice
-    choice=$(echo -e "Movies\nTV Shows\nMusic\nDownloads\n----------\nUpdate\nHelp\n----------\nQuit" | fzf --reverse --header="Select Media Type" --prompt="Search Menu > ")
+    choice=$(echo -e "Movies\nTV Shows\nMusic\nDownloads\n----------\nUpdate\nHelp\n----------\nQuit" | fzf_menu --reverse --header="Select Media Type" --prompt="Search Menu > ")
 
     if [[ -z "$choice" ]]; then
         clear
