@@ -1,0 +1,403 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["textual>=5.0", "plexapi>=4.15"]
+# ///
+"""plextui - browse and play plex media in the terminal."""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import tempfile
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from plexapi.server import PlexServer
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal
+from textual.widgets import DataTable, Footer, Input, Label, Select
+
+PLAYABLE = {"movie", "episode", "track", "clip"}
+CHILDREN = {"show": "seasons", "season": "episodes", "artist": "albums", "album": "tracks"}
+ANY = "\0any"
+
+
+def load_config() -> tuple[str, str]:
+    """read plex url/token from the clix config, env wins."""
+    path = Path(
+        os.environ.get("CLIX_CONFIG")
+        or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "clix" / "config"
+    )
+    values: dict[str, str] = {}
+    if path.is_file():
+        for line in path.read_text().splitlines():
+            if m := re.match(r'\s*(PLEX_URL|PLEX_TOKEN)\s*=\s*"?([^"]*)"?\s*$', line):
+                values[m[1]] = m[2]
+    url = os.environ.get("CLIX_PLEX_URL") or values.get("PLEX_URL", "")
+    token = os.environ.get("CLIX_PLEX_TOKEN") or values.get("PLEX_TOKEN", "")
+    return url, token
+
+
+def duration(ms: int | None) -> str:
+    if not ms:
+        return ""
+    total = ms // 1000
+    if total >= 3600:
+        return f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}"
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def progress_mark(item) -> str:
+    if getattr(item, "viewOffset", None):
+        pct = int(item.viewOffset / item.duration * 100) if item.duration else 0
+        return f"{pct}%"
+    if getattr(item, "viewCount", 0):
+        return "✓"
+    total = getattr(item, "leafCount", None)
+    seen = getattr(item, "viewedLeafCount", None)
+    if total is not None and seen is not None:
+        return f"{total - seen} left" if total > seen else "✓"
+    return ""
+
+
+# columns per plex type: (heading, width, cell function)
+LAYOUTS = {
+    "movie": [("Title", 0, lambda i: i.title), ("Year", 6, lambda i: i.year or ""),
+              ("Rating", 6, lambda i: i.contentRating or ""),
+              ("Length", 8, lambda i: duration(i.duration)), ("", 8, progress_mark)],
+    "show": [("Show", 0, lambda i: i.title), ("Year", 6, lambda i: i.year or ""),
+             ("Seasons", 8, lambda i: i.childCount or ""), ("", 8, progress_mark)],
+    "season": [("Season", 0, lambda i: i.title),
+               ("Episodes", 9, lambda i: i.leafCount or ""), ("", 8, progress_mark)],
+    "episode": [("#", 5, lambda i: f"{i.parentIndex}x{i.index:02d}"),
+                ("Title", 0, lambda i: i.title),
+                ("Length", 8, lambda i: duration(i.duration)), ("", 8, progress_mark)],
+    "artist": [("Artist", 0, lambda i: i.title), ("Albums", 7, lambda i: i.childCount or "")],
+    "album": [("Album", 0, lambda i: i.title), ("Year", 6, lambda i: i.year or ""),
+              ("Tracks", 7, lambda i: i.leafCount or "")],
+    "track": [("#", 4, lambda i: i.index or ""), ("Title", 0, lambda i: i.title),
+              ("Album", 30, lambda i: i.parentTitle or ""),
+              ("Length", 8, lambda i: duration(i.duration))],
+}
+LAYOUTS["clip"] = LAYOUTS["movie"]
+
+
+@dataclass
+class Level:
+    """one rung of the browse stack."""
+
+    title: str
+    items: list = field(default_factory=list)
+    section: Any = None
+    parent: Any = None
+
+
+class PlexTUI(App):
+    CSS = """
+    Screen { layers: base overlay; }
+    #bar { height: 1; dock: top; background: $panel; }
+    #bar Select { width: 20; margin: 0 1 0 0; }
+    #bar Select.wide { width: 26; }
+    #bar Input { width: 1fr; margin: 0 1 0 0; }
+    #count { width: auto; color: $text-muted; padding: 0 1; }
+    #crumbs { height: 1; dock: top; color: $text-muted; padding: 0 1; }
+    DataTable { height: 1fr; }
+    """
+
+    BINDINGS = [
+        ("escape", "back", "Back"),
+        ("slash", "search", "Search"),
+        ("ctrl+r", "refresh", "Reload"),
+        ("ctrl+d", "toggle_dir", "Sort dir"),
+        ("ctrl+q", "quit", "Quit"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.url, self.token = load_config()
+        self.server: PlexServer | None = None
+        self.sections: dict[str, Any] = {}
+        self.stack: list[Level] = []
+        self.sort_dir = "asc"
+        self.year_field = "year"
+        self.quiet = False  # suppress reloads while repopulating the bar
+
+    # ---------------------------------------------------------------- layout
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="bar"):
+            yield Select([], prompt="Library", id="library", compact=True, allow_blank=True)
+            yield Select([], prompt="Genre", id="genre", compact=True, allow_blank=True)
+            yield Select([], prompt="Year", id="year", compact=True, allow_blank=True)
+            yield Select([], prompt="Sort", id="sort", compact=True, allow_blank=True,
+                         classes="wide")
+            yield Input(placeholder="filter…", id="search", compact=True)
+            yield Label("", id="count")
+        yield Label("", id="crumbs")
+        yield DataTable(id="items", cursor_type="row", zebra_stripes=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#items", DataTable).focus()
+        self.connect()
+
+    # ------------------------------------------------------------ plex calls
+
+    @work(thread=True, exclusive=True, group="connect")
+    def connect(self) -> None:
+        if not self.url or not self.token:
+            self.call_from_thread(self.bail, "Set PLEX_URL and PLEX_TOKEN in ~/.config/clix/config")
+            return
+        self.call_from_thread(self.status, "connecting…")
+        try:
+            server = PlexServer(self.url, self.token)
+            sections = list(server.library.sections())
+        except Exception as exc:
+            self.call_from_thread(self.bail, f"{exc}")
+            return
+        self.server = server
+        self.sections = {s.title: s for s in sections}
+        options = [("Continue Watching", ANY)] + [(s.title, s.title) for s in sections]
+        self.call_from_thread(self.set_libraries, options)
+
+    def set_libraries(self, options: list[tuple[str, str]]) -> None:
+        select = self.query_one("#library", Select)
+        self.quiet = True
+        select.set_options(options)
+        self.quiet = False
+        select.value = options[0][1]
+
+    @work(thread=True, exclusive=True, group="section")
+    def load_section(self, title: str) -> None:
+        """populate the filter bar from the server, then load items."""
+        if title == ANY:
+            self.call_from_thread(self.status, "loading…")
+            items = self.continue_watching()
+            self.call_from_thread(self.set_filters, [], [], [])
+            self.call_from_thread(self.show, Level("Continue Watching", items))
+            return
+
+        section = self.sections[title]
+        self.call_from_thread(self.status, "loading filters…")
+        try:
+            fields = {f.filter for f in section.listFilters()}
+        except Exception:
+            fields = set()
+        genres = self.choices(section, "genre") if "genre" in fields else []
+        # decade keeps the dropdown short; not every library type offers it
+        self.year_field = "decade" if "decade" in fields else "year"
+        years = self.choices(section, self.year_field) if self.year_field in fields else []
+        try:
+            sorts = [(s.title, s.key) for s in section.listSorts()]
+        except Exception:
+            sorts = [("Title", "titleSort")]
+        self.call_from_thread(self.set_filters, genres, years, sorts)
+        self.call_from_thread(self.reload_items)
+
+    @staticmethod
+    def choices(section, field_name: str) -> list[tuple[str, str]]:
+        try:
+            return [(c.title, c.title) for c in section.listFilterChoices(field_name)]
+        except Exception:
+            return []
+
+    def set_filters(self, genres, years, sorts) -> None:
+        self.quiet = True
+        for wid, options in (("#genre", genres), ("#year", years), ("#sort", sorts)):
+            select = self.query_one(wid, Select)
+            # sort always has a value; the filters default to no restriction
+            prefix = [] if wid == "#sort" else [("any", ANY)]
+            select.set_options(prefix + list(options) if options else [])
+            select.disabled = not options
+            if options:
+                select.value = options[0][1] if wid == "#sort" else ANY
+        self.quiet = False
+
+    @work(thread=True, exclusive=True, group="items")
+    def reload_items(self) -> None:
+        title = self.query_one("#library", Select).value
+        if title in (Select.BLANK, ANY) or title not in self.sections:
+            return
+        section = self.sections[title]
+        filters = {}
+        for widget_id, field_name in (("genre", "genre"), ("year", self.year_field)):
+            value = self.query_one(f"#{widget_id}", Select).value
+            if value not in (Select.BLANK, ANY):
+                filters[field_name] = value
+        sort = self.query_one("#sort", Select).value
+        kwargs = {} if sort is Select.BLANK else {"sort": f"{sort}:{self.sort_dir}"}
+
+        self.call_from_thread(self.status, "loading…")
+        try:
+            items = section.search(**filters, **kwargs)
+        except Exception as exc:
+            self.call_from_thread(self.status, f"error: {exc}")
+            return
+        self.call_from_thread(self.show, Level(section.title, items, section=section))
+
+    def continue_watching(self) -> list:
+        assert self.server
+        try:
+            return self.server.fetchItems("/hubs/continueWatching")
+        except Exception:
+            return self.server.library.onDeck()
+
+    @work(thread=True, exclusive=True, group="items")
+    def drill(self, item) -> None:
+        self.call_from_thread(self.status, "loading…")
+        try:
+            children = list(getattr(item, CHILDREN[item.type])())
+        except Exception as exc:
+            self.call_from_thread(self.status, f"error: {exc}")
+            return
+        self.call_from_thread(self.show, Level(item.title, children, parent=item), True)
+
+    # -------------------------------------------------------------- rendering
+
+    def show(self, level: Level, push: bool = False) -> None:
+        if push:
+            self.stack.append(level)
+        else:
+            self.stack = [level]
+        self.query_one("#search", Input).value = ""
+        self.render_level()
+
+    def render_level(self) -> None:
+        level = self.stack[-1]
+        table = self.query_one("#items", DataTable)
+        table.clear(columns=True)
+
+        kind = level.items[0].type if level.items else "movie"
+        layout = LAYOUTS.get(kind, LAYOUTS["movie"])
+        for heading, width, _ in layout:
+            table.add_column(heading, width=width or None, key=heading)
+
+        needle = self.query_one("#search", Input).value.lower()
+        shown = 0
+        for index, item in enumerate(level.items):
+            if needle and needle not in item.title.lower():
+                continue
+            table.add_row(*(str(cell(item)) for _, _, cell in layout), key=str(index))
+            shown += 1
+
+        self.query_one("#crumbs", Label).update(
+            " › ".join(lvl.title for lvl in self.stack) if len(self.stack) > 1 else ""
+        )
+        total = len(level.items)
+        self.status(f"{shown}/{total}" if shown != total else str(total))
+        for name in ("#genre", "#year", "#sort"):
+            self.query_one(name, Select).disabled = len(self.stack) > 1
+
+    def status(self, text: str) -> None:
+        self.query_one("#count", Label).update(text)
+
+    def bail(self, message: str) -> None:
+        self.exit(message=message)
+
+    # --------------------------------------------------------------- playback
+
+    def play(self, item) -> None:
+        assert self.server
+        try:
+            part = item.media[0].parts[0]
+        except (AttributeError, IndexError):
+            self.status("no playable part")
+            return
+
+        url = self.server.url(part.key, includeToken=False)
+        watch_dir = tempfile.mkdtemp(prefix="plextui-")
+        cmd = [
+            "mpv", f"--title={item.title}", "--no-resume-playback",
+            "--save-position-on-quit", f"--watch-later-dir={watch_dir}",
+            f"--http-header-fields=X-Plex-Token: {self.token}",
+        ]
+        offset = (getattr(item, "viewOffset", 0) or 0) // 1000
+        if offset:
+            cmd.append(f"--start={offset}")
+        cmd.append(url)
+
+        with self.suspend():
+            result = subprocess.run(cmd)
+
+        position = self.resume_point(watch_dir)
+        shutil.rmtree(watch_dir, ignore_errors=True)
+        self.report(item, position, result.returncode)
+        self.refresh(layout=True)
+
+    @staticmethod
+    def resume_point(watch_dir: str) -> int | None:
+        """mpv writes a watch-later file only when playback is quit early."""
+        for path in Path(watch_dir).iterdir():
+            for line in path.read_text().splitlines():
+                if line.startswith("start="):
+                    return int(float(line.removeprefix("start=")))
+        return None
+
+    def report(self, item, position: int | None, returncode: int) -> None:
+        if item.type not in ("movie", "episode"):
+            return
+        try:
+            if position:
+                item.updateTimeline(position * 1000, state="stopped", duration=item.duration)
+            elif returncode == 0:
+                item.markPlayed()
+        except Exception as exc:
+            self.status(f"progress not saved: {exc}")
+
+    # ----------------------------------------------------------------- events
+
+    @on(Select.Changed, "#library")
+    def library_changed(self, event: Select.Changed) -> None:
+        if not self.quiet and event.value is not Select.BLANK:
+            self.load_section(str(event.value))
+
+    @on(Select.Changed, "#genre")
+    @on(Select.Changed, "#year")
+    @on(Select.Changed, "#sort")
+    def filter_changed(self) -> None:
+        if not self.quiet:
+            self.reload_items()
+
+    @on(Input.Changed, "#search")
+    def search_changed(self) -> None:
+        if self.stack:
+            self.render_level()
+
+    @on(DataTable.RowSelected)
+    def row_selected(self, event: DataTable.RowSelected) -> None:
+        item = self.stack[-1].items[int(event.row_key.value)]
+        if item.type in PLAYABLE:
+            self.play(item)
+        elif item.type in CHILDREN:
+            self.drill(item)
+
+    # ---------------------------------------------------------------- actions
+
+    def action_back(self) -> None:
+        if len(self.stack) > 1:
+            self.stack.pop()
+            self.render_level()
+        else:
+            self.exit()
+
+    def action_search(self) -> None:
+        self.query_one("#search", Input).focus()
+
+    def action_refresh(self) -> None:
+        if len(self.stack) > 1:
+            self.drill(self.stack[-1].parent)
+        else:
+            self.reload_items()
+
+    def action_toggle_dir(self) -> None:
+        self.sort_dir = "desc" if self.sort_dir == "asc" else "asc"
+        self.reload_items()
+
+
+if __name__ == "__main__":
+    PlexTUI().run()
