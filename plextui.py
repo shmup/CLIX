@@ -88,6 +88,33 @@ LAYOUTS = {
 LAYOUTS["clip"] = LAYOUTS["movie"]
 
 
+def num(item, attr: str) -> float:
+    return getattr(item, attr, 0) or 0
+
+
+# clickable column heading -> plex sort key
+SORTS = {
+    "Title": "titleSort", "Show": "titleSort", "Season": "index",
+    "Artist": "titleSort", "Album": "titleSort", "Year": "year",
+    "Rating": "contentRating", "Length": "duration", "#": "index",
+    "Seasons": "childCount", "Albums": "childCount",
+    "Episodes": "leafCount", "Tracks": "leafCount",
+}
+# in-memory ordering for the columns whose displayed text sorts wrong; the rest
+# fall back to their own cell text, which is what the reader is comparing anyway
+LOCAL = {
+    "Season": lambda i: num(i, "index"),
+    "Year": lambda i: num(i, "year"),
+    "Length": lambda i: num(i, "duration"),
+    "#": lambda i: (num(i, "parentIndex"), num(i, "index")),
+    "Seasons": lambda i: num(i, "childCount"),
+    "Albums": lambda i: num(i, "childCount"),
+    "Episodes": lambda i: num(i, "leafCount"),
+    "Tracks": lambda i: num(i, "leafCount"),
+}
+MARKS = {"asc": " ▲", "desc": " ▼"}
+
+
 def mixed_label(item) -> str:
     """continue watching holds movies and episodes side by side."""
     if item.type == "episode":
@@ -111,6 +138,7 @@ class Level:
     items: list = field(default_factory=list)
     section: Any = None
     parent: Any = None
+    sorted_by: str = ""
 
 
 class ItemTable(DataTable):
@@ -121,7 +149,12 @@ class ItemTable(DataTable):
         event.prevent_default()
         meta = event.style.meta
         row, column = meta.get("row", -1), meta.get("column", -1)
-        if row >= 0 and column >= 0:
+        if column < 0:
+            return
+        if row < 0:
+            col = self.ordered_columns[column]
+            self.post_message(DataTable.HeaderSelected(self, col.key, column, label=col.label))
+        else:
             self.cursor_coordinate = Coordinate(row, column)
 
 
@@ -153,6 +186,7 @@ class PlexTUI(App):
         self.sections: dict[str, Any] = {}
         self.stack: list[Level] = []
         self.sort_dir = "asc"
+        self.sort_keys: set[str] = set()  # what the current library can sort on server-side
         self.year_field = "year"
         self.quiet = False  # suppress reloads while repopulating the bar
 
@@ -237,6 +271,7 @@ class PlexTUI(App):
             return []
 
     def set_filters(self, genres, years, sorts) -> None:
+        self.sort_keys = {key for _, key in sorts}
         self.quiet = True
         for wid, options in (("#genre", genres), ("#year", years), ("#sort", sorts)):
             select = self.query_one(wid, Select)
@@ -302,15 +337,34 @@ class PlexTUI(App):
         self.query_one("#search", Input).value = ""
         self.render_level()
 
+    @staticmethod
+    def layout_for(level: Level) -> list:
+        kinds = {item.type for item in level.items}
+        return LAYOUTS.get(kinds.pop(), MIXED) if len(kinds) == 1 else MIXED
+
+    def sorted_heading(self) -> str:
+        """which column the current level is ordered by, server sort or local."""
+        level = self.stack[-1]
+        if level.sorted_by:
+            return level.sorted_by
+        if level.section is None:
+            return ""
+        key = self.query_one("#sort", Select).value
+        layout = self.layout_for(level)
+        return next((h for h, _, _ in layout if SORTS.get(h) == key), "")
+
     def render_level(self) -> None:
         level = self.stack[-1]
         table = self.query_one("#items", DataTable)
         table.clear(columns=True)
 
-        kinds = {item.type for item in level.items}
-        layout = LAYOUTS.get(kinds.pop(), MIXED) if len(kinds) == 1 else MIXED
+        layout = self.layout_for(level)
+        current = self.sorted_heading()
         for heading, width, _ in layout:
-            table.add_column(heading, width=width or None, key=heading)
+            label = heading + (MARKS[self.sort_dir] if current and heading == current else "")
+            # reserve room for the marker so sorting never shifts the columns
+            table.add_column(label, width=max(width, len(heading) + 2) if width else None,
+                             key=heading)
 
         needle = self.query_one("#search", Input).value.lower()
         shown = 0
@@ -403,6 +457,36 @@ class PlexTUI(App):
         if self.stack:
             self.render_level()
 
+    @on(DataTable.HeaderSelected)
+    def header_selected(self, event: DataTable.HeaderSelected) -> None:
+        heading = str(event.column_key.value)
+        if not self.stack or heading not in SORTS:
+            return
+        same = heading == self.sorted_heading()
+        self.sort_dir = "desc" if same and self.sort_dir == "asc" else "asc"
+        self.apply_sort(heading)
+
+    def apply_sort(self, heading: str) -> None:
+        """server-side when the library offers the key, in memory otherwise."""
+        level = self.stack[-1]
+        plex_key = SORTS[heading]
+        if level.section is not None and plex_key in self.sort_keys:
+            select = self.query_one("#sort", Select)
+            if select.value == plex_key:
+                self.reload_items()
+            else:
+                select.value = plex_key  # Changed reloads for us
+            return
+        level.sorted_by = heading
+        level.items.sort(key=self.local_key(level, heading), reverse=self.sort_dir == "desc")
+        self.render_level()
+
+    def local_key(self, level: Level, heading: str):
+        if heading in LOCAL:
+            return LOCAL[heading]
+        cell = next(c for h, _, c in self.layout_for(level) if h == heading)
+        return lambda item: str(cell(item)).lower()
+
     @on(DataTable.RowSelected)
     def row_selected(self, event: DataTable.RowSelected) -> None:
         item = self.stack[-1].items[int(event.row_key.value)]
@@ -430,8 +514,13 @@ class PlexTUI(App):
             self.reload_items()
 
     def action_toggle_dir(self) -> None:
+        if not self.stack:
+            return
         self.sort_dir = "desc" if self.sort_dir == "asc" else "asc"
-        self.reload_items()
+        if heading := self.sorted_heading():
+            self.apply_sort(heading)
+        elif self.stack[-1].section is not None:
+            self.reload_items()
 
 
 if __name__ == "__main__":
