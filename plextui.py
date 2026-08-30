@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from plexapi.server import PlexServer
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Footer, Input, Label, Select
 
 PLAYABLE = {"movie", "episode", "track", "clip"}
@@ -112,6 +113,18 @@ class Level:
     parent: Any = None
 
 
+class ItemTable(DataTable):
+    """a click only moves the cursor; playing is Enter and Enter alone.
+    prevent_default keeps the stock handler from selecting on a second click."""
+
+    def _on_click(self, event: events.Click) -> None:
+        event.prevent_default()
+        meta = event.style.meta
+        row, column = meta.get("row", -1), meta.get("column", -1)
+        if row >= 0 and column >= 0:
+            self.cursor_coordinate = Coordinate(row, column)
+
+
 class PlexTUI(App):
     CSS = """
     Screen { layers: base overlay; }
@@ -155,7 +168,7 @@ class PlexTUI(App):
             yield Input(placeholder="filter…", id="search", compact=True)
             yield Label("", id="count")
         yield Label("", id="crumbs")
-        yield DataTable(id="items", cursor_type="row", zebra_stripes=True)
+        yield ItemTable(id="items", cursor_type="row", zebra_stripes=True)
         yield Footer()
 
     def on_mount(self) -> None:
