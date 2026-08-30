@@ -87,6 +87,21 @@ LAYOUTS = {
 LAYOUTS["clip"] = LAYOUTS["movie"]
 
 
+def mixed_label(item) -> str:
+    """continue watching holds movies and episodes side by side."""
+    if item.type == "episode":
+        return f"{item.grandparentTitle} – {item.parentIndex}x{item.index:02d} {item.title}"
+    return item.title
+
+
+MIXED = [
+    ("Title", 0, mixed_label),
+    ("Year", 6, lambda i: getattr(i, "year", "") or ""),
+    ("Length", 8, lambda i: duration(getattr(i, "duration", 0))),
+    ("", 8, progress_mark),
+]
+
+
 @dataclass
 class Level:
     """one rung of the browse stack."""
@@ -100,12 +115,13 @@ class Level:
 class PlexTUI(App):
     CSS = """
     Screen { layers: base overlay; }
-    #bar { height: 1; dock: top; background: $panel; }
+    #bar { height: 1; background: $panel; }
     #bar Select { width: 20; margin: 0 1 0 0; }
+    #bar #library { width: 24; }
     #bar Select.wide { width: 26; }
     #bar Input { width: 1fr; margin: 0 1 0 0; }
     #count { width: auto; color: $text-muted; padding: 0 1; }
-    #crumbs { height: 1; dock: top; color: $text-muted; padding: 0 1; }
+    #crumbs { height: 1; display: none; color: $text-muted; padding: 0 1; }
     DataTable { height: 1fr; }
     """
 
@@ -162,7 +178,7 @@ class PlexTUI(App):
             return
         self.server = server
         self.sections = {s.title: s for s in sections}
-        options = [("Continue Watching", ANY)] + [(s.title, s.title) for s in sections]
+        options = [("Resume", ANY)] + [(s.title, s.title) for s in sections]
         self.call_from_thread(self.set_libraries, options)
 
     def set_libraries(self, options: list[tuple[str, str]]) -> None:
@@ -179,7 +195,7 @@ class PlexTUI(App):
             self.call_from_thread(self.status, "loading…")
             items = self.continue_watching()
             self.call_from_thread(self.set_filters, [], [], [])
-            self.call_from_thread(self.show, Level("Continue Watching", items))
+            self.call_from_thread(self.show, Level("Resume", items))
             return
 
         section = self.sections[title]
@@ -241,11 +257,16 @@ class PlexTUI(App):
         self.call_from_thread(self.show, Level(section.title, items, section=section))
 
     def continue_watching(self) -> list:
+        """the hub endpoint returns Hub wrappers; the media is one level down."""
         assert self.server
         try:
-            return self.server.fetchItems("/hubs/continueWatching")
+            hubs = self.server.fetchItems("/hubs/continueWatching")
+            items = [item for hub in hubs for item in getattr(hub, "items", [])]
+            if items:
+                return items
         except Exception:
-            return self.server.library.onDeck()
+            pass
+        return self.server.library.onDeck()
 
     @work(thread=True, exclusive=True, group="items")
     def drill(self, item) -> None:
@@ -272,8 +293,8 @@ class PlexTUI(App):
         table = self.query_one("#items", DataTable)
         table.clear(columns=True)
 
-        kind = level.items[0].type if level.items else "movie"
-        layout = LAYOUTS.get(kind, LAYOUTS["movie"])
+        kinds = {item.type for item in level.items}
+        layout = LAYOUTS.get(kinds.pop(), MIXED) if len(kinds) == 1 else MIXED
         for heading, width, _ in layout:
             table.add_column(heading, width=width or None, key=heading)
 
@@ -285,9 +306,9 @@ class PlexTUI(App):
             table.add_row(*(str(cell(item)) for _, _, cell in layout), key=str(index))
             shown += 1
 
-        self.query_one("#crumbs", Label).update(
-            " › ".join(lvl.title for lvl in self.stack) if len(self.stack) > 1 else ""
-        )
+        crumbs = self.query_one("#crumbs", Label)
+        crumbs.display = len(self.stack) > 1
+        crumbs.update(" › ".join(lvl.title for lvl in self.stack))
         total = len(level.items)
         self.status(f"{shown}/{total}" if shown != total else str(total))
         for name in ("#genre", "#year", "#sort"):
