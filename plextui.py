@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
+import time
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,11 +24,34 @@ from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.coordinate import Coordinate
-from textual.widgets import DataTable, Footer, Input, Label, Select
+from textual.theme import Theme
+from textual.widgets import DataTable, Input, Label, Select
 
 PLAYABLE = {"movie", "episode", "track", "clip"}
 CHILDREN = {"show": "seasons", "season": "episodes", "artist": "albums", "album": "tracks"}
 ANY = "\0any"
+
+NOIR = Theme(
+    name="noir",
+    primary="#c8c8c8",
+    secondary="#8f8f8f",
+    accent="#ededed",
+    foreground="#cbcbcb",
+    background="#0d0d0d",
+    surface="#151515",
+    panel="#1e1e1e",
+    boost="#ffffff0d",
+    success="#a8a8a8",
+    warning="#c4c4c4",
+    error="#efefef",
+    dark=True,
+    variables={
+        "block-cursor-foreground": "#0d0d0d",
+        "block-cursor-background": "#cbcbcb",
+        "block-cursor-text-style": "none",
+        "input-selection-background": "#3a3a3a",
+    },
+)
 
 
 def load_config() -> tuple[str, str]:
@@ -86,6 +112,26 @@ LAYOUTS = {
               ("Length", 8, lambda i: duration(i.duration))],
 }
 LAYOUTS["clip"] = LAYOUTS["movie"]
+
+
+def mpv_time_pos(ipc: str) -> float | None:
+    """ask a running mpv where it is; the socket appears a moment after launch."""
+    try:
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(0.5)
+            sock.connect(ipc)
+            sock.sendall(b'{"command":["get_property","time-pos"]}\n')
+            data = sock.recv(4096)
+    except OSError:
+        return None
+    for line in data.splitlines():
+        try:
+            reply = json.loads(line)
+        except ValueError:
+            continue
+        if reply.get("error") == "success" and isinstance(reply.get("data"), (int, float)):
+            return reply["data"]
+    return None
 
 
 def num(item, attr: str) -> float:
@@ -189,6 +235,7 @@ class PlexTUI(App):
         self.sort_keys: set[str] = set()  # what the current library can sort on server-side
         self.year_field = "year"
         self.quiet = False  # suppress reloads while repopulating the bar
+        self.playing = False  # mpv now runs alongside the tui, so only one at a time
 
     # ---------------------------------------------------------------- layout
 
@@ -203,9 +250,10 @@ class PlexTUI(App):
             yield Label("", id="count")
         yield Label("", id="crumbs")
         yield ItemTable(id="items", cursor_type="row", zebra_stripes=True)
-        yield Footer()
 
     def on_mount(self) -> None:
+        self.register_theme(NOIR)
+        self.theme = NOIR.name
         self.query_one("#items", DataTable).focus()
         self.connect()
 
@@ -390,19 +438,23 @@ class PlexTUI(App):
 
     # --------------------------------------------------------------- playback
 
+    @work(thread=True)
     def play(self, item) -> None:
         assert self.server
         try:
             part = item.media[0].parts[0]
         except (AttributeError, IndexError):
-            self.status("no playable part")
+            self.call_from_thread(self.status, "no playable part")
+            self.playing = False
             return
 
         url = self.server.url(part.key, includeToken=False)
         watch_dir = tempfile.mkdtemp(prefix="plextui-")
+        ipc = str(Path(watch_dir) / "ipc")
         cmd = [
-            "mpv", f"--title={item.title}", "--no-resume-playback",
+            "mpv", f"--title={item.title}", "--no-terminal", "--no-resume-playback",
             "--save-position-on-quit", f"--watch-later-dir={watch_dir}",
+            f"--input-ipc-server={ipc}",
             f"--http-header-fields=X-Plex-Token: {self.token}",
         ]
         offset = (getattr(item, "viewOffset", 0) or 0) // 1000
@@ -410,18 +462,57 @@ class PlexTUI(App):
             cmd.append(f"--start={offset}")
         cmd.append(url)
 
-        with self.suspend():
-            result = subprocess.run(cmd)
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            shutil.rmtree(watch_dir, ignore_errors=True)
+            self.call_from_thread(self.status, f"mpv: {exc}")
+            self.playing = False
+            return
+        self.follow(proc, ipc, item)
 
         position = self.resume_point(watch_dir)
         shutil.rmtree(watch_dir, ignore_errors=True)
-        self.report(item, position, result.returncode)
-        self.refresh(layout=True)
+        self.report(item, position, proc.returncode)
+        if position:
+            item.viewOffset = position * 1000
+        elif proc.returncode == 0:
+            item.viewOffset = 0
+            item.viewCount = (getattr(item, "viewCount", 0) or 0) + 1
+        self.call_from_thread(self.update_progress, item)
+        self.playing = False
+
+    def follow(self, proc, ipc: str, item) -> None:
+        """mirror mpv's clock into the progress column until it exits."""
+        while proc.poll() is None:
+            position = mpv_time_pos(ipc)
+            if position is not None:
+                item.viewOffset = int(position * 1000)
+                self.call_from_thread(self.update_progress, item)
+            time.sleep(1)
+
+    def update_progress(self, item) -> None:
+        """repaint just the progress cell, if the item is still on screen."""
+        if not self.stack:
+            return
+        level = self.stack[-1]
+        layout = self.layout_for(level)
+        column = next((n for n, (heading, _, _) in enumerate(layout) if not heading), None)
+        if column is None:
+            return
+        table = self.query_one("#items", DataTable)
+        try:
+            row = table.get_row_index(str(level.items.index(item)))
+        except (ValueError, KeyError):
+            return
+        table.update_cell_at(Coordinate(row, column), progress_mark(item))
 
     @staticmethod
     def resume_point(watch_dir: str) -> int | None:
         """mpv writes a watch-later file only when playback is quit early."""
         for path in Path(watch_dir).iterdir():
+            if not path.is_file():  # the ipc socket lives here too
+                continue
             for line in path.read_text().splitlines():
                 if line.startswith("start="):
                     return int(float(line.removeprefix("start=")))
@@ -436,7 +527,7 @@ class PlexTUI(App):
             elif returncode == 0:
                 item.markPlayed()
         except Exception as exc:
-            self.status(f"progress not saved: {exc}")
+            self.call_from_thread(self.status, f"progress not saved: {exc}")
 
     # ----------------------------------------------------------------- events
 
@@ -491,6 +582,10 @@ class PlexTUI(App):
     def row_selected(self, event: DataTable.RowSelected) -> None:
         item = self.stack[-1].items[int(event.row_key.value)]
         if item.type in PLAYABLE:
+            if self.playing:
+                self.status("already playing")
+                return
+            self.playing = True
             self.play(item)
         elif item.type in CHILDREN:
             self.drill(item)
