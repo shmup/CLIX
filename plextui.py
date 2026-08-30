@@ -230,8 +230,9 @@ class PlexTUI(App):
 
     @staticmethod
     def choices(section, field_name: str) -> list[tuple[str, str]]:
+        # the key is what search() wants; decade titles ("1980s") fail its int check
         try:
-            return [(c.title, c.title) for c in section.listFilterChoices(field_name)]
+            return [(c.title, c.key) for c in section.listFilterChoices(field_name)]
         except Exception:
             return []
 
