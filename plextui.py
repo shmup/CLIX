@@ -20,16 +20,19 @@ from pathlib import Path
 from typing import Any
 
 from plexapi.server import PlexServer
+from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.coordinate import Coordinate
 from textual.theme import Theme
 from textual.widgets import DataTable, Input, Label, Select
+from textual.widgets.data_table import RowDoesNotExist
 
 PLAYABLE = {"movie", "episode", "track", "clip"}
 CHILDREN = {"show": "seasons", "season": "episodes", "artist": "albums", "album": "tracks"}
 ANY = "\0any"
+PLAYING = "bold #ffffff"  # the row mpv is on, against the grayscale rest
 
 NOIR = Theme(
     name="noir",
@@ -235,7 +238,8 @@ class PlexTUI(App):
         self.sort_keys: set[str] = set()  # what the current library can sort on server-side
         self.year_field = "year"
         self.quiet = False  # suppress reloads while repopulating the bar
-        self.playing = False  # mpv now runs alongside the tui, so only one at a time
+        self.playing_key = None  # mpv runs alongside the tui, so only one item at a time
+        self.elapsed = 0.0  # seconds mpv reports, shown in place of the progress mark
 
     # ---------------------------------------------------------------- layout
 
@@ -419,7 +423,7 @@ class PlexTUI(App):
         for index, item in enumerate(level.items):
             if needle and needle not in item.title.lower():
                 continue
-            table.add_row(*(str(cell(item)) for _, _, cell in layout), key=str(index))
+            table.add_row(*(self.cell_text(item, h, c) for h, _, c in layout), key=str(index))
             shown += 1
 
         crumbs = self.query_one("#crumbs", Label)
@@ -429,6 +433,31 @@ class PlexTUI(App):
         self.status(f"{shown}/{total}" if shown != total else str(total))
         for name in ("#genre", "#year", "#sort"):
             self.query_one(name, Select).disabled = len(self.stack) > 1
+
+    def cell_text(self, item, heading: str, cell) -> str | Text:
+        """the playing row stands out, and its progress column runs as a clock."""
+        if self.playing_key is None or getattr(item, "ratingKey", None) != self.playing_key:
+            return str(cell(item))
+        text = (duration(int(self.elapsed * 1000)) or "0:00") if not heading else str(cell(item))
+        return Text(text, style=PLAYING)
+
+    def repaint_row(self, rating_key) -> None:
+        """redraw one item's row in place, leaving the cursor where it is."""
+        if not self.stack:
+            return
+        level = self.stack[-1]
+        table = self.query_one("#items", DataTable)
+        layout = self.layout_for(level)
+        for index, item in enumerate(level.items):
+            if getattr(item, "ratingKey", None) != rating_key:
+                continue
+            try:
+                row = table.get_row_index(str(index))
+            except RowDoesNotExist:
+                return
+            for column, (heading, _, cell) in enumerate(layout):
+                table.update_cell_at(Coordinate(row, column), self.cell_text(item, heading, cell))
+            return
 
     def status(self, text: str) -> None:
         self.query_one("#count", Label).update(text)
@@ -445,7 +474,7 @@ class PlexTUI(App):
             part = item.media[0].parts[0]
         except (AttributeError, IndexError):
             self.call_from_thread(self.status, "no playable part")
-            self.playing = False
+            self.stop_playing(item)
             return
 
         url = self.server.url(part.key, includeToken=False)
@@ -467,7 +496,7 @@ class PlexTUI(App):
         except OSError as exc:
             shutil.rmtree(watch_dir, ignore_errors=True)
             self.call_from_thread(self.status, f"mpv: {exc}")
-            self.playing = False
+            self.stop_playing(item)
             return
         self.follow(proc, ipc, item)
 
@@ -479,8 +508,7 @@ class PlexTUI(App):
         elif proc.returncode == 0:
             item.viewOffset = 0
             item.viewCount = (getattr(item, "viewCount", 0) or 0) + 1
-        self.call_from_thread(self.update_progress, item)
-        self.playing = False
+        self.stop_playing(item)
 
     def follow(self, proc, ipc: str, item) -> None:
         """mirror mpv's clock into the progress column until it exits."""
@@ -488,24 +516,15 @@ class PlexTUI(App):
             position = mpv_time_pos(ipc)
             if position is not None:
                 item.viewOffset = int(position * 1000)
-                self.call_from_thread(self.update_progress, item)
+                self.elapsed = position
+                self.call_from_thread(self.repaint_row, item.ratingKey)
             time.sleep(1)
 
-    def update_progress(self, item) -> None:
-        """repaint just the progress cell, if the item is still on screen."""
-        if not self.stack:
-            return
-        level = self.stack[-1]
-        layout = self.layout_for(level)
-        column = next((n for n, (heading, _, _) in enumerate(layout) if not heading), None)
-        if column is None:
-            return
-        table = self.query_one("#items", DataTable)
-        try:
-            row = table.get_row_index(str(level.items.index(item)))
-        except (ValueError, KeyError):
-            return
-        table.update_cell_at(Coordinate(row, column), progress_mark(item))
+    def stop_playing(self, item) -> None:
+        """drop the highlight and put the progress mark back."""
+        self.playing_key = None
+        self.elapsed = 0.0
+        self.call_from_thread(self.repaint_row, getattr(item, "ratingKey", None))
 
     @staticmethod
     def resume_point(watch_dir: str) -> int | None:
@@ -582,10 +601,11 @@ class PlexTUI(App):
     def row_selected(self, event: DataTable.RowSelected) -> None:
         item = self.stack[-1].items[int(event.row_key.value)]
         if item.type in PLAYABLE:
-            if self.playing:
+            if self.playing_key is not None:
                 self.status("already playing")
                 return
-            self.playing = True
+            self.playing_key = item.ratingKey
+            self.repaint_row(self.playing_key)
             self.play(item)
         elif item.type in CHILDREN:
             self.drill(item)
