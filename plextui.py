@@ -30,7 +30,12 @@ from textual.widgets import DataTable, Input, Label, Select
 from textual.widgets.data_table import RowDoesNotExist
 
 PLAYABLE = {"movie", "episode", "track", "clip"}
-CHILDREN = {"show": "seasons", "season": "episodes", "artist": "albums", "album": "tracks"}
+CHILDREN = {
+    "show": "seasons",
+    "season": "episodes",
+    "artist": "albums",
+    "album": "tracks",
+}
 ANY = "\0any"
 PLAYING = "bold #ffffff"  # the row mpv is on, against the grayscale rest
 
@@ -61,7 +66,9 @@ def load_config() -> tuple[str, str]:
     """read plex url/token from the clix config, env wins."""
     path = Path(
         os.environ.get("CLIX_CONFIG")
-        or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "clix" / "config"
+        or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        / "clix"
+        / "config"
     )
     values: dict[str, str] = {}
     if path.is_file():
@@ -97,22 +104,45 @@ def progress_mark(item) -> str:
 
 # columns per plex type: (heading, width, cell function)
 LAYOUTS = {
-    "movie": [("Title", 0, lambda i: i.title), ("Year", 6, lambda i: i.year or ""),
-              ("Rating", 6, lambda i: i.contentRating or ""),
-              ("Length", 8, lambda i: duration(i.duration)), ("", 8, progress_mark)],
-    "show": [("Show", 0, lambda i: i.title), ("Year", 6, lambda i: i.year or ""),
-             ("Seasons", 8, lambda i: i.childCount or ""), ("", 8, progress_mark)],
-    "season": [("Season", 0, lambda i: i.title),
-               ("Episodes", 9, lambda i: i.leafCount or ""), ("", 8, progress_mark)],
-    "episode": [("#", 5, lambda i: f"{i.parentIndex}x{i.index:02d}"),
-                ("Title", 0, lambda i: i.title),
-                ("Length", 8, lambda i: duration(i.duration)), ("", 8, progress_mark)],
-    "artist": [("Artist", 0, lambda i: i.title), ("Albums", 7, lambda i: i.childCount or "")],
-    "album": [("Album", 0, lambda i: i.title), ("Year", 6, lambda i: i.year or ""),
-              ("Tracks", 7, lambda i: i.leafCount or "")],
-    "track": [("#", 4, lambda i: i.index or ""), ("Title", 0, lambda i: i.title),
-              ("Album", 30, lambda i: i.parentTitle or ""),
-              ("Length", 8, lambda i: duration(i.duration))],
+    "movie": [
+        ("Title", 0, lambda i: i.title),
+        ("Year", 6, lambda i: i.year or ""),
+        ("Rating", 6, lambda i: i.contentRating or ""),
+        ("Length", 8, lambda i: duration(i.duration)),
+        ("", 8, progress_mark),
+    ],
+    "show": [
+        ("Show", 0, lambda i: i.title),
+        ("Year", 6, lambda i: i.year or ""),
+        ("Seasons", 8, lambda i: i.childCount or ""),
+        ("", 8, progress_mark),
+    ],
+    "season": [
+        ("Season", 0, lambda i: i.title),
+        ("Episodes", 9, lambda i: i.leafCount or ""),
+        ("", 8, progress_mark),
+    ],
+    "episode": [
+        ("#", 5, lambda i: f"{i.parentIndex}x{i.index:02d}"),
+        ("Title", 0, lambda i: i.title),
+        ("Length", 8, lambda i: duration(i.duration)),
+        ("", 8, progress_mark),
+    ],
+    "artist": [
+        ("Artist", 0, lambda i: i.title),
+        ("Albums", 7, lambda i: i.childCount or ""),
+    ],
+    "album": [
+        ("Album", 0, lambda i: i.title),
+        ("Year", 6, lambda i: i.year or ""),
+        ("Tracks", 7, lambda i: i.leafCount or ""),
+    ],
+    "track": [
+        ("#", 4, lambda i: i.index or ""),
+        ("Title", 0, lambda i: i.title),
+        ("Album", 30, lambda i: i.parentTitle or ""),
+        ("Length", 8, lambda i: duration(i.duration)),
+    ],
 }
 LAYOUTS["clip"] = LAYOUTS["movie"]
 
@@ -132,7 +162,9 @@ def mpv_time_pos(ipc: str) -> float | None:
             reply = json.loads(line)
         except ValueError:
             continue
-        if reply.get("error") == "success" and isinstance(reply.get("data"), (int, float)):
+        if reply.get("error") == "success" and isinstance(
+            reply.get("data"), (int, float)
+        ):
             return reply["data"]
     return None
 
@@ -143,11 +175,19 @@ def num(item, attr: str) -> float:
 
 # clickable column heading -> plex sort key
 SORTS = {
-    "Title": "titleSort", "Show": "titleSort", "Season": "index",
-    "Artist": "titleSort", "Album": "titleSort", "Year": "year",
-    "Rating": "contentRating", "Length": "duration", "#": "index",
-    "Seasons": "childCount", "Albums": "childCount",
-    "Episodes": "leafCount", "Tracks": "leafCount",
+    "Title": "titleSort",
+    "Show": "titleSort",
+    "Season": "index",
+    "Artist": "titleSort",
+    "Album": "titleSort",
+    "Year": "year",
+    "Rating": "contentRating",
+    "Length": "duration",
+    "#": "index",
+    "Seasons": "childCount",
+    "Albums": "childCount",
+    "Episodes": "leafCount",
+    "Tracks": "leafCount",
 }
 # in-memory ordering for the columns whose displayed text sorts wrong; the rest
 # fall back to their own cell text, which is what the reader is comparing anyway
@@ -202,7 +242,9 @@ class ItemTable(DataTable):
             return
         if row < 0:
             col = self.ordered_columns[column]
-            self.post_message(DataTable.HeaderSelected(self, col.key, column, label=col.label))
+            self.post_message(
+                DataTable.HeaderSelected(self, col.key, column, label=col.label)
+            )
         else:
             self.cursor_coordinate = Coordinate(row, column)
 
@@ -235,21 +277,33 @@ class PlexTUI(App):
         self.sections: dict[str, Any] = {}
         self.stack: list[Level] = []
         self.sort_dir = "asc"
-        self.sort_keys: set[str] = set()  # what the current library can sort on server-side
+        self.sort_keys: set[str] = (
+            set()
+        )  # what the current library can sort on server-side
         self.year_field = "year"
         self.quiet = False  # suppress reloads while repopulating the bar
-        self.playing_key = None  # mpv runs alongside the tui, so only one item at a time
+        self.playing_key = (
+            None  # mpv runs alongside the tui, so only one item at a time
+        )
         self.elapsed = 0.0  # seconds mpv reports, shown in place of the progress mark
 
     # ---------------------------------------------------------------- layout
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="bar"):
-            yield Select([], prompt="Library", id="library", compact=True, allow_blank=True)
+            yield Select(
+                [], prompt="Library", id="library", compact=True, allow_blank=True
+            )
             yield Select([], prompt="Genre", id="genre", compact=True, allow_blank=True)
             yield Select([], prompt="Year", id="year", compact=True, allow_blank=True)
-            yield Select([], prompt="Sort", id="sort", compact=True, allow_blank=True,
-                         classes="wide")
+            yield Select(
+                [],
+                prompt="Sort",
+                id="sort",
+                compact=True,
+                allow_blank=True,
+                classes="wide",
+            )
             yield Input(placeholder="filter…", id="search", compact=True)
             yield Label("", id="count")
         yield Label("", id="crumbs")
@@ -266,7 +320,9 @@ class PlexTUI(App):
     @work(thread=True, exclusive=True, group="connect")
     def connect(self) -> None:
         if not self.url or not self.token:
-            self.call_from_thread(self.bail, "Set PLEX_URL and PLEX_TOKEN in ~/.config/clix/config")
+            self.call_from_thread(
+                self.bail, "Set PLEX_URL and PLEX_TOKEN in ~/.config/clix/config"
+            )
             return
         self.call_from_thread(self.status, "connecting…")
         try:
@@ -306,7 +362,9 @@ class PlexTUI(App):
         genres = self.choices(section, "genre") if "genre" in fields else []
         # decade keeps the dropdown short; not every library type offers it
         self.year_field = "decade" if "decade" in fields else "year"
-        years = self.choices(section, self.year_field) if self.year_field in fields else []
+        years = (
+            self.choices(section, self.year_field) if self.year_field in fields else []
+        )
         try:
             sorts = [(s.title, s.key) for s in section.listSorts()]
         except Exception:
@@ -413,17 +471,24 @@ class PlexTUI(App):
         layout = self.layout_for(level)
         current = self.sorted_heading()
         for heading, width, _ in layout:
-            label = heading + (MARKS[self.sort_dir] if current and heading == current else "")
+            label = heading + (
+                MARKS[self.sort_dir] if current and heading == current else ""
+            )
             # reserve room for the marker so sorting never shifts the columns
-            table.add_column(label, width=max(width, len(heading) + 2) if width else None,
-                             key=heading)
+            table.add_column(
+                label,
+                width=max(width, len(heading) + 2) if width else None,
+                key=heading,
+            )
 
         needle = self.query_one("#search", Input).value.lower()
         shown = 0
         for index, item in enumerate(level.items):
             if needle and needle not in item.title.lower():
                 continue
-            table.add_row(*(self.cell_text(item, h, c) for h, _, c in layout), key=str(index))
+            table.add_row(
+                *(self.cell_text(item, h, c) for h, _, c in layout), key=str(index)
+            )
             shown += 1
 
         crumbs = self.query_one("#crumbs", Label)
@@ -436,9 +501,16 @@ class PlexTUI(App):
 
     def cell_text(self, item, heading: str, cell) -> str | Text:
         """the playing row stands out, and its progress column runs as a clock."""
-        if self.playing_key is None or getattr(item, "ratingKey", None) != self.playing_key:
+        if (
+            self.playing_key is None
+            or getattr(item, "ratingKey", None) != self.playing_key
+        ):
             return str(cell(item))
-        text = (duration(int(self.elapsed * 1000)) or "0:00") if not heading else str(cell(item))
+        text = (
+            (duration(int(self.elapsed * 1000)) or "0:00")
+            if not heading
+            else str(cell(item))
+        )
         return Text(text, style=PLAYING)
 
     def repaint_row(self, rating_key) -> None:
@@ -456,7 +528,9 @@ class PlexTUI(App):
             except RowDoesNotExist:
                 return
             for column, (heading, _, cell) in enumerate(layout):
-                table.update_cell_at(Coordinate(row, column), self.cell_text(item, heading, cell))
+                table.update_cell_at(
+                    Coordinate(row, column), self.cell_text(item, heading, cell)
+                )
             return
 
     def status(self, text: str) -> None:
@@ -481,8 +555,12 @@ class PlexTUI(App):
         watch_dir = tempfile.mkdtemp(prefix="plextui-")
         ipc = str(Path(watch_dir) / "ipc")
         cmd = [
-            "mpv", f"--title={item.title}", "--no-terminal", "--no-resume-playback",
-            "--save-position-on-quit", f"--watch-later-dir={watch_dir}",
+            "mpv",
+            f"--title={item.title}",
+            "--no-terminal",
+            "--no-resume-playback",
+            "--save-position-on-quit",
+            f"--watch-later-dir={watch_dir}",
             f"--input-ipc-server={ipc}",
             f"--http-header-fields=X-Plex-Token: {self.token}",
         ]
@@ -492,7 +570,9 @@ class PlexTUI(App):
         cmd.append(url)
 
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
         except OSError as exc:
             shutil.rmtree(watch_dir, ignore_errors=True)
             self.call_from_thread(self.status, f"mpv: {exc}")
@@ -542,7 +622,9 @@ class PlexTUI(App):
             return
         try:
             if position:
-                item.updateTimeline(position * 1000, state="stopped", duration=item.duration)
+                item.updateTimeline(
+                    position * 1000, state="stopped", duration=item.duration
+                )
             elif returncode == 0:
                 item.markPlayed()
         except Exception as exc:
@@ -588,7 +670,9 @@ class PlexTUI(App):
                 select.value = plex_key  # Changed reloads for us
             return
         level.sorted_by = heading
-        level.items.sort(key=self.local_key(level, heading), reverse=self.sort_dir == "desc")
+        level.items.sort(
+            key=self.local_key(level, heading), reverse=self.sort_dir == "desc"
+        )
         self.render_level()
 
     def local_key(self, level: Level, heading: str):
