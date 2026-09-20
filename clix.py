@@ -116,7 +116,7 @@ def fzf_menu(
         "--expect=ctrl-c",
         "--ansi",
         "--color=fg:#eeeeee,bg:-1,fg+:#eeeeee:bold,bg+:-1,hl:#ff0000:bold,hl+:#ff0000:bold,"
-        "pointer:#ff0000,prompt:#ff0000,header:#666666,info:#666666,separator:#444444,gutter:-1",
+        "pointer:#ff0000,prompt:#a04040,header:#666666,info:#666666,separator:#444444,gutter:-1",
         "--pointer=›",
         "--layout=default",
         "--no-scrollbar",
