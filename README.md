@@ -101,6 +101,11 @@ To find your Plex token, follow the instructions here: [Finding an authenticatio
 ./clix.sh
 ```
 
+The Python implementation keeps the same fzf menus, configuration, and download
+folders. Run it with `uv run clix.py` or `./clix.py`. It requires uv, bash, curl,
+fzf, mpv, less, and clear, with no Python package dependencies. It supports `-h`
+and `-v`; the updater is omitted.
+
 ### Command Line Options
 
 ```
