@@ -108,26 +108,40 @@ def pause() -> None:
 
 
 def fzf_menu(
-    entries: list[tuple[str, T]], header: str, prompt: str = "", *, disabled: bool = False
+    entries: list[tuple[str, T]], header: str, *, disabled: bool = False
 ) -> tuple[str, T] | None:
     # Hidden row IDs preserve identity even when two items have the same title.
     args = [
         "fzf",
         "--expect=ctrl-c",
-        "--reverse",
-        f"--header={header}",
+        "--ansi",
+        "--color=fg:#eeeeee,bg:-1,fg+:#eeeeee:bold,bg+:-1,hl:#ff0000:bold,hl+:#ff0000:bold,"
+        "pointer:#ff0000,prompt:#ff0000,header:#666666,info:#666666,separator:#444444,gutter:-1",
+        "--pointer=›",
+        "--layout=default",
+        "--no-scrollbar",
+        "--border=none",
+        "--prompt=> ",
+        f"--header={header.lower()}",
         "--delimiter=\t",
         "--with-nth=2..",
     ]
-    if prompt:
-        args.append(f"--prompt={prompt}")
     if disabled:
         args.append("--disabled")
-    rows = "".join(
-        f"{i}\t{label.replace(chr(10), ' ').replace(chr(13), ' ')}\n"
-        for i, (label, _) in enumerate(entries)
-    )
-    result = subprocess.run(args, input=rows, text=True, stdout=subprocess.PIPE)
+    labels = [" ".join(label.lower().split()) for label, _ in entries]
+    width = min(max((len(label) for label in labels), default=0), 48)
+    rows = []
+    for i, ((_, item), label) in enumerate(zip(entries, labels)):
+        details = ""
+        if isinstance(item, ET.Element):
+            genres = ", ".join(genre.get("tag", "") for genre in item.findall("Genre"))
+            details = ". ".join(
+                value for value in (item.get("year", ""), genres, item.get("summary", "")) if value
+            )
+        if details:
+            label = f"{label:<{width}}  \033[90m{' '.join(details.lower().split())}\033[0m"
+        rows.append(f"{i}\t{label}\n")
+    result = subprocess.run(args, input="".join(rows), text=True, stdout=subprocess.PIPE)
     key, _, selection = result.stdout.partition("\n")
     if key == "ctrl-c":
         raise KeyboardInterrupt
@@ -143,8 +157,8 @@ def fzf_menu(
         raise ClixError("Could not read fzf selection") from exc
 
 
-def choose(labels: list[str], header: str, prompt: str = "") -> str:
-    selected = fzf_menu([(label, label) for label in labels], header, prompt)
+def choose(labels: list[str], header: str) -> str:
+    selected = fzf_menu([(label, label) for label in labels], header)
     return selected[0] if selected else ""
 
 
@@ -357,7 +371,6 @@ class Clix:
                 else fzf_menu(
                     libraries,
                     f"Select {library_name} Library",
-                    f"Search {library_name} Libraries > ",
                 )
             )
             if selected is None:
@@ -387,12 +400,10 @@ class Clix:
                     entries.append((label, on_deck))
             for item in items:
                 label = item.get("title", "")
-                if name == "Movie":
-                    label += f" ({item.get('year', '')})"
-                elif name in ("Episode", "Track"):
+                if name in ("Episode", "Track"):
                     label = f"{item.get('index', '')}. {label}"
                 entries.append((label, item))
-            selected = fzf_menu(entries, f"{context}Select {name}", f"Search {name}s > ")
+            selected = fzf_menu(entries, f"{context}Select {name}")
             if selected is None:
                 return
             label, item = selected
@@ -432,13 +443,11 @@ class Clix:
                 label = (
                     episode_title(item) if item.get("type") == "episode" else item.get("title", "")
                 )
-                if item.get("type") != "episode" and item.get("year"):
-                    label += f" ({item.get('year')})"
                 entries.append((label + progress_label(item, next_up=True), item))
             if not entries:
                 empty_menu("Nothing in progress")
                 return
-            selected = fzf_menu(entries, "Continue Watching", "Search Continue Watching > ")
+            selected = fzf_menu(entries, "Continue Watching")
             if selected is None:
                 clear()
                 return
@@ -488,7 +497,7 @@ class Clix:
         offset = number(item, "viewOffset") if kind != "music" else 0
         if offset:
             options.insert(0, f"Resume from {format_time(offset)}")
-        action = choose(options + ["Cancel"], f"Select Action for: {title}", "Choose action > ")
+        action = choose(options + ["Cancel"], f"Select Action for: {title}")
         if not action or action == "Cancel":
             return
         clear()
@@ -570,7 +579,7 @@ class Clix:
 
     def downloads_menu(self) -> None:
         while choice := choose(
-            ["Movies", "TV Shows", "Music"], "Downloads Menu", "Search Downloads > "
+            ["Movies", "TV Shows", "Music"], "Downloads Menu"
         ):
             folder, levels, empty = {
                 "Movies": ("movies", ("Movie",), "movies"),
@@ -614,7 +623,7 @@ class Clix:
                 label = f"{int(match[1])}. {match[2]}" if match else label.replace("*", "/")
                 entries.append((label, path))
             selected = fzf_menu(
-                entries, f"{context}Select Downloaded {name}", f"Search Downloaded {name}s > "
+                entries, f"{context}Select Downloaded {name}"
             )
             if selected is None:
                 return
@@ -655,7 +664,7 @@ class Clix:
             "Quit",
         ]
         while True:
-            choice = choose(labels, "Select Media Type", "Search Menu > ")
+            choice = choose(labels, "Select Media Type")
             try:
                 if not choice or choice == "Quit":
                     if not choice:
