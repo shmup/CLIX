@@ -132,14 +132,28 @@ def fzf_menu(
     width = min(max((len(label) for label in labels), default=0), 48)
     rows = []
     for i, ((_, item), label) in enumerate(zip(entries, labels)):
-        details = ""
+        padding = " " * max(0, width - len(label))
+        label = re.sub(
+            r"\[(next up|\d+(?::\d+)+ / \d+(?::\d+)+)\]$",
+            lambda match: (
+                f"\033[38;2;160;64;64m[\033[38;2;170;170;170m{match[1]}"
+                "\033[38;2;160;64;64m]\033[0m"
+            ),
+            label,
+        )
+        details = []
         if isinstance(item, ET.Element):
             genres = ", ".join(genre.get("tag", "") for genre in item.findall("Genre"))
-            details = ". ".join(
-                value for value in (item.get("year", ""), genres, item.get("summary", "")) if value
-            )
+            for value, shade, suffix in (
+                (item.get("year", ""), 112, "."),
+                (genres, 144, "."),
+                (item.get("summary", ""), 176, ""),
+            ):
+                if value:
+                    text = " ".join(value.lower().split())
+                    details.append(f"\033[38;2;{shade};{shade};{shade}m{text}{suffix}\033[0m")
         if details:
-            label = f"{label:<{width}}  \033[90m{' '.join(details.lower().split())}\033[0m"
+            label = f"{label}{padding}  {' '.join(details)}"
         rows.append(f"{i}\t{label}\n")
     result = subprocess.run(args, input="".join(rows), text=True, stdout=subprocess.PIPE)
     key, _, selection = result.stdout.partition("\n")
